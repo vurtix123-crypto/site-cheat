@@ -1,6 +1,4 @@
 export const distribution = {
-  // Прямая ссылка на карточку ключа на FunPay.
-  funPayProductUrl: "",
-  // Положи файл в public/downloads и укажи путь, например "/downloads/ArtemikDLC-Launcher.exe".
-  launcherPath: "",
+  funPayProductUrl: "https://funpay.com/lots/offer?id=81742640",
+  launcherPath: "https://drive.google.com/file/d/1RCdSPpPzNjsWsmTe7-JYdL6iJaYEvWkP/view?usp=sharing",
 };
