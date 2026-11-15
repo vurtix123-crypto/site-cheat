@@ -1,6 +1,5 @@
-import { launcherDownloadPath } from "../app/distribution";
-
 const defaultOrigin = "https://de-bots6.h1cloud.net:25237";
+const upstreamPath = "/api/launcher/download";
 const attachment = 'attachment; filename="ArtemikDLCLauncher.exe"';
 const headers = {
   "Cache-Control": "no-store",
@@ -31,7 +30,7 @@ export async function downloadLauncher(request: Request, configuredOrigin?: stri
         (origin.protocol !== "https:" && !(localPreview && loopback && origin.protocol === "http:"))) {
       return unavailable();
     }
-    upstream = await fetch(new URL(launcherDownloadPath, origin), {
+    upstream = await fetch(new URL(upstreamPath, origin), {
       method,
       redirect: "manual",
       cache: "no-store",
@@ -46,8 +45,9 @@ export async function downloadLauncher(request: Request, configuredOrigin?: stri
   }
 
   const length = upstream.headers.get("Content-Length");
+  const contentType = upstream.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase();
   if (upstream.status !== 200 ||
-      upstream.headers.get("Content-Type") !== "application/octet-stream" ||
+      (contentType !== "application/octet-stream" && contentType !== "application/vnd.microsoft.portable-executable") ||
       !length || !/^[1-9]\d*$/.test(length) ||
       (method === "GET" && !upstream.body)) {
     await upstream.body?.cancel().catch(() => {});
