@@ -1,65 +1,109 @@
-const defaultOrigin = "https://de-bots6.h1cloud.net:25237";
-const upstreamPath = "/api/launcher/download";
-const attachment = 'attachment; filename="ArtemikDLCLauncher.exe"';
-const headers = {
-  "Cache-Control": "no-store",
-  "X-Content-Type-Options": "nosniff",
+import { readFileSync } from "node:fs";
+import vinext from "vinext";
+import { defineConfig } from "vite";
+import { readExecutionProfile } from "./scripts/execution-profile.mjs";
+import { configureToolEnvironment } from "./scripts/tool-environment.mjs";
+import { sites } from "./scripts/vite/sites-vite-plugin";
+import { connectorPreview } from "./scripts/vite/connector-preview-plugin.mjs";
+
+const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
+  "00000000-0000-4000-8000-000000000000";
+
+function readSitesManifest(): { d1?: string | null; r2?: string | null } | null {
+  try {
+    const manifest = readFileSync(new URL("./.openai/hosting.json", import.meta.url), "utf8");
+    return JSON.parse(manifest);
+  } catch (error) {
+    // The manifest is optional when building outside OpenAI Sites.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+const hostingConfig = readSitesManifest();
+const { d1, r2 } = hostingConfig ?? {};
+
+// macOS Seatbelt blocks FSEvents, so Codex previews need polling for HMR.
+const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
+const managedLinux = readExecutionProfile() === "managed-linux";
+
+const localBindingConfig = {
+  main: "./worker/index.ts",
+  // Preserve runtime variables such as LAUNCHER_ORIGIN set in Cloudflare.
+  keep_vars: true,
+  d1_databases: d1
+    ? [
+        {
+          binding: d1,
+          database_name: "site-creator-d1",
+          database_id: SITE_CREATOR_PLACEHOLDER_DATABASE_ID,
+        },
+      ]
+    : [],
+  r2_buckets: r2
+    ? [
+        {
+          binding: r2,
+          bucket_name: "site-creator-r2",
+        },
+      ]
+    : [],
 };
 
-function errorResponse(method: string, status: number, text: string, extra?: Record<string, string>) {
-  return new Response(method === "HEAD" ? null : text, {
-    status,
-    headers: { ...headers, "Content-Type": "text/plain; charset=utf-8", ...extra },
-  });
-}
+export default defineConfig(async ({ command }) => {
+  configureToolEnvironment(process.cwd());
 
-export async function downloadLauncher(request: Request, configuredOrigin?: string, localPreview = false) {
-  const { method } = request;
-  if (method !== "GET" && method !== "HEAD") {
-    return errorResponse(method, 405, "Допустимы только GET и HEAD.", { Allow: "GET, HEAD" });
-  }
+  // Wrangler snapshots its log path while the Cloudflare plugin is imported.
+  const { cloudflare } = await import("@cloudflare/vite-plugin");
 
-  const unavailable = () => errorResponse(method, 503, "Лаунчер временно недоступен. Попробуй скачать его позже.");
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8_000);
-  let upstream: Response;
-  try {
-    const origin = new URL(configuredOrigin || defaultOrigin);
-    const loopback = origin.hostname === "127.0.0.1" || origin.hostname === "localhost";
-    if (origin.username || origin.password ||
-        (origin.protocol !== "https:" && !(localPreview && loopback && origin.protocol === "http:"))) {
-      return unavailable();
-    }
-    upstream = await fetch(new URL(upstreamPath, origin), {
-      method,
-      redirect: "manual",
-      cache: "no-store",
-      signal: controller.signal,
-      headers: { "Accept-Encoding": "identity" },
-    });
-  } catch {
-    return unavailable();
-  } finally {
-    // The timeout covers connection and headers; a slow download can still finish.
-    clearTimeout(timeout);
-  }
-
-  const length = upstream.headers.get("Content-Length");
-  const contentType = upstream.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase();
-  if (upstream.status !== 200 ||
-      (contentType !== "application/octet-stream" && contentType !== "application/vnd.microsoft.portable-executable") ||
-      !length || !/^[1-9]\d*$/.test(length) ||
-      (method === "GET" && !upstream.body)) {
-    await upstream.body?.cancel().catch(() => {});
-    return unavailable();
-  }
-
-  return new Response(method === "HEAD" ? null : upstream.body, {
-    headers: {
-      ...headers,
-      "Content-Type": "application/octet-stream",
-      "Content-Length": length,
-      "Content-Disposition": attachment,
+  return {
+    server: {
+      ...(managedLinux
+        ? { host: "0.0.0.0", allowedHosts: ["terminal.local"] }
+        : {}),
+      ...(isCodexSeatbeltSandbox
+        ? { watch: { useFsEvents: false, usePolling: true } }
+        : {}),
     },
-  });
-}
+    plugins: [
+      vinext(),
+      ...(hostingConfig ? [sites({ mockAuth: !managedLinux })] : []),
+      connectorPreview(),
+      cloudflare({
+        viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
+        inspectorPort: false,
+        config: (config) => ({
+          ...localBindingConfig,
+          // The plugin appends flags from this override to those in wrangler.jsonc.
+          ...(!config.compatibility_flags?.includes("nodejs_compat")
+            ? { compatibility_flags: ["nodejs_compat"] }
+            : {}),
+          ...(command === "serve"
+            ? {
+                services: [
+                  {
+                    binding: "CONNECTORS",
+                    service: "sites-connector-preview",
+                    entrypoint: "ConnectorPreview",
+                  },
+                ],
+              }
+            : {}),
+        }),
+        ...(command === "serve"
+          ? {
+              auxiliaryWorkers: [
+                {
+                  config: {
+                    name: "sites-connector-preview",
+                    main: "./scripts/connector-preview/worker.mjs",
+                    compatibility_date: "2026-05-15",
+                  },
+                },
+              ],
+            }
+          : {}),
+      }),
+    ],
+  };
+});
